@@ -1,27 +1,37 @@
 -- PPBuddy.lua
--- Mini buff status bar for non-Paladins using PallyPowerTW data.
--- Shows which blessings are assigned to your class, highlights have/missing,
--- lets you click a missing buff to whisper the assigned paladin,
--- and lets you ban (auto-remove) any buff via a checkbox.
+-- Compact blessing status bar for any class.
+-- Works standalone: listens to PallyPower's PLPWR addon messages directly.
+-- Also reads PallyPowerTW globals if PP is installed locally (no conflict).
+-- No dependency on PallyPowerTW.
 
 -- ============================================================
--- Config / saved vars
+-- Saved variables (populated by WoW from disk before PLAYER_LOGIN)
 -- ============================================================
-PPBuddy_Config = {
-    banned = {},    -- [blessingID] = true if banned
-    posX   = nil,
-    posY   = nil,
+-- PPBuddy_Config is declared in the TOC as SavedVariables.
+-- Do NOT initialise it here — that would overwrite the loaded data.
+-- Defaults are applied in PPB_Init() after the saved data is available.
+
+-- ============================================================
+-- Constants
+-- ============================================================
+local PP_PREFIX   = "PLPWR"
+local UPDATE_FREQ = 2
+
+-- PallyPower class IDs — mirrors PallyPower_ClassID in PP localization.
+-- Key: UnitClass() token (always English uppercase in 1.12).
+local ClassTokenToID = {
+    WARRIOR = 0,
+    ROGUE   = 1,
+    PRIEST  = 2,
+    DRUID   = 3,
+    PALADIN = 4,
+    HUNTER  = 5,
+    MAGE    = 6,
+    WARLOCK = 7,
+    SHAMAN  = 8,
+    -- 9 = hunter pets, shares Warriors slot in PP
 }
 
--- ============================================================
--- Internal state
--- ============================================================
-local ADDON_NAME    = "PPBuddy"
-local UPDATE_FREQ   = 2          -- seconds between UI refreshes
-local timeSince     = 0
-
--- Blessing name table (mirrors PallyPower_BlessingID from PallyPowerTW)
--- Index matches PallyPower_Assignments[pallyName][classID] values (0-5)
 local BlessingNames = {
     [0] = "Wisdom",
     [1] = "Might",
@@ -31,18 +41,17 @@ local BlessingNames = {
     [5] = "Sanctuary",
 }
 
--- Blessing buff texture fragments used by PallyPowerTW (Greater Blessing icons)
--- These match the BuffIcon[] table in PallyPower.lua (indexed 0-5 by blessing ID)
+-- Texture fragments for buff detection (Greater Blessing variants)
 local BlessingTextures = {
     [0] = "Spell_Holy_GreaterBlessingofWisdom",
-    [1] = "Spell_Holy_GreaterBlessingofKings",    -- Might uses Kings icon slot 1
+    [1] = "Spell_Holy_GreaterBlessingofKings",
     [2] = "Spell_Holy_GreaterBlessingofSalvation",
     [3] = "Spell_Holy_GreaterBlessingofLight",
-    [4] = "Spell_Magic_GreaterBlessingofKings",   -- Kings
+    [4] = "Spell_Magic_GreaterBlessingofKings",
     [5] = "Spell_Holy_GreaterBlessingofSanctuary",
 }
 
--- Regular blessing texture fragments (BuffIconSmall[] in PallyPower.lua)
+-- Texture fragments for regular (10-min) blessing variants
 local BlessingTexturesSmall = {
     [0] = "Spell_Holy_SealOfWisdom",
     [1] = "Spell_Holy_FistOfJustice",
@@ -52,8 +61,7 @@ local BlessingTexturesSmall = {
     [5] = "Spell_Nature_LightningShield",
 }
 
--- Full interface paths for icons (matching what PallyPowerTW uses)
-local ICON_PREFIX = "Interface\\AddOns\\PallyPowerTW\\Icons\\"
+local ICON_PREFIX = "Interface\\Icons\\"
 
 local BlessingIcons = {
     [0] = ICON_PREFIX .. "Spell_Holy_GreaterBlessingofWisdom",
@@ -64,21 +72,12 @@ local BlessingIcons = {
     [5] = ICON_PREFIX .. "Spell_Holy_GreaterBlessingofSanctuary",
 }
 
--- PallyPower class IDs (mirrors PallyPower_ClassID from localization)
--- Key: the TOKEN returned by UnitClass() second arg (always English in 1.12)
--- Value: the numeric class slot PallyPower uses in Assignments[pallyName][classID]
-local ClassTokenToID = {
-    WARRIOR  = 0,
-    ROGUE    = 1,
-    PRIEST   = 2,
-    DRUID    = 3,
-    PALADIN  = 4,
-    HUNTER   = 5,
-    MAGE     = 6,
-    WARLOCK  = 7,
-    SHAMAN   = 8,
-    -- class 9 = Hunter Pets (shares slot 0/Warriors in PP logic)
-}
+-- ============================================================
+-- Own assignment table
+-- PPB_Assignments[pallyName][classID (0-9)] = blessingID (0-5) or -1
+-- Built from PLPWR messages and/or PP globals.
+-- ============================================================
+local PPB_Assignments = {}
 
 -- ============================================================
 -- Helpers
@@ -88,16 +87,12 @@ local function PPB_Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffffff00PPBuddy:|r " .. tostring(msg))
 end
 
--- Get PallyPower class ID for the local player.
--- UnitClass() in 1.12 returns (localizedName, token) — token is always English uppercase.
 local function PPB_GetMyClassID()
     local _, token = UnitClass("player")
     if not token then return nil end
     return ClassTokenToID[token]
 end
 
---- Check whether the player currently has a specific blessing buff.
--- UnitBuff in 1.12 returns the texture path string (or nil when done).
 local function PPB_HasBuff(blessingID)
     local fragGreat = BlessingTextures[blessingID]
     local fragSmall = BlessingTexturesSmall[blessingID]
@@ -112,14 +107,13 @@ local function PPB_HasBuff(blessingID)
     return false
 end
 
---- Cancel a buff by texture fragment match (same approach as LazyPig / PallyPowerTW).
 local function PPB_CancelBuff(blessingID)
     local fragGreat = BlessingTextures[blessingID]
     local fragSmall = BlessingTexturesSmall[blessingID]
     local counter = 0
     while GetPlayerBuff(counter) >= 0 do
         local index, untilCancelled = GetPlayerBuff(counter)
-        if untilCancelled ~= 1 then  -- skip permanent/until-cancelled buffs
+        if untilCancelled ~= 1 then
             local tex = GetPlayerBuffTexture(index)
             if tex then
                 if (fragGreat and string.find(tex, fragGreat)) or
@@ -135,25 +129,104 @@ local function PPB_CancelBuff(blessingID)
     end
 end
 
---- Return list of {blessingID, pallyName} for all blessings assigned to my class.
--- PallyPower_Assignments is keyed [pallyName][classID (0-9)] = blessingID (0-5) or -1
--- In WoW 1.12 Lua 5.0, "for k,v in table" iterates via next() — works on mixed tables.
+-- If PallyPowerTW is installed locally, sync its globals into our own table.
+-- Called on login and periodically so local PP data is always reflected.
+local function PPB_SyncFromPP()
+    if not PallyPower_Assignments then return end
+    for pallyName, assignments in next, PallyPower_Assignments do
+        if type(assignments) == "table" then
+            if not PPB_Assignments[pallyName] then
+                PPB_Assignments[pallyName] = {}
+            end
+            for classID = 0, 9 do
+                local bid = assignments[classID]
+                if bid and type(bid) == "number" then
+                    PPB_Assignments[pallyName][classID] = bid
+                end
+            end
+        end
+    end
+end
+
+-- Parse a SELF message: "SELF <12-char ranks>@<10-char assignments>"
+-- assign = 10 chars: 1 char per class slot (blessingID digit or "n")
+local function PPB_ParseSelf(sender, msg)
+    local _, _, numbers, assign = string.find(msg, "SELF ([0-9n]*)@?([0-9n]*)")
+    if not numbers then return end
+    if not PPB_Assignments[sender] then
+        PPB_Assignments[sender] = {}
+    end
+    if assign and assign ~= "" then
+        for classID = 0, 9 do
+            local ch = string.sub(assign, classID + 1, classID + 1)
+            if ch == "n" or ch == "" then
+                PPB_Assignments[sender][classID] = -1
+            else
+                PPB_Assignments[sender][classID] = tonumber(ch) or -1
+            end
+        end
+    end
+end
+
+-- Parse "ASSIGN <pallyName> <classID> <blessingID>"
+local function PPB_ParseAssign(msg)
+    local _, _, name, classID, bid = string.find(msg, "ASSIGN (.*) (.*) (.*)")
+    if not name then return end
+    classID = tonumber(classID)
+    bid     = tonumber(bid)
+    if not classID or not bid then return end
+    if not PPB_Assignments[name] then PPB_Assignments[name] = {} end
+    PPB_Assignments[name][classID] = bid
+end
+
+-- Parse "MASSIGN <pallyName> <blessingID>"  (same blessing for all classes)
+local function PPB_ParseMassign(msg)
+    local _, _, name, bid = string.find(msg, "MASSIGN (.*) (.*)")
+    if not name then return end
+    bid = tonumber(bid)
+    if not bid then return end
+    if not PPB_Assignments[name] then PPB_Assignments[name] = {} end
+    for classID = 0, 9 do
+        PPB_Assignments[name][classID] = bid
+    end
+end
+
+-- Wipe a sender's assignments on CLEAR
+local function PPB_ParseClear(sender)
+    PPB_Assignments[sender] = nil
+end
+
+-- Drop assignments for paladins no longer in the group
+local function PPB_PruneAssignments()
+    local present = {}
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do
+            local name = GetRaidRosterInfo(i)
+            if name then present[name] = true end
+        end
+    else
+        present[UnitName("player")] = true
+        for i = 1, GetNumPartyMembers() do
+            local name = UnitName("party" .. i)
+            if name then present[name] = true end
+        end
+    end
+    for name in next, PPB_Assignments do
+        if not present[name] then
+            PPB_Assignments[name] = nil
+        end
+    end
+end
+
+-- Return list of {blessingID, pallyName} for blessings assigned to my class.
 local function PPB_GetMyAssignments()
     local myClassID = PPB_GetMyClassID()
     if myClassID == nil then return {} end
 
-    local results = {}
-    if not PallyPower_Assignments then return results end
-
-    -- seen[blessingID] = pallyName — one entry per unique blessing, first pally wins
     local seen = {}
-
-    -- WoW 1.12 Lua 5.0: generic for with next() works on all table types
-    for pallyName, assignments in next, PallyPower_Assignments do
+    for pallyName, assignments in next, PPB_Assignments do
         if type(assignments) == "table" then
-            -- assignments is keyed 0-9 (numeric), iterate with next
             local bid = assignments[myClassID]
-            -- bid is a number (0-5) when assigned, -1 or nil when unassigned
             if bid and type(bid) == "number" and bid >= 0 and bid <= 5 then
                 if not seen[bid] then
                     seen[bid] = pallyName
@@ -162,7 +235,7 @@ local function PPB_GetMyAssignments()
         end
     end
 
-    -- Build ordered result list (blessing IDs 0-5 in order)
+    local results = {}
     for bid = 0, 5 do
         if seen[bid] then
             table.insert(results, { blessingID = bid, pallyName = seen[bid] })
@@ -174,24 +247,19 @@ end
 -- ============================================================
 -- Frame construction
 -- ============================================================
--- Layout: a single horizontal strip of square icon-buttons.
--- Each button is ICON_SIZE x ICON_SIZE with a coloured border.
--- A small ban-X overlay sits in the bottom-right corner.
--- All text lives in tooltips only.
 
-local PPBFrame   -- main container
-local PPBBtns = {}  -- array of icon buttons, one per blessing
-local PPB_UpdateUI  -- forward declaration (defined below PPB_GetOrCreateBtn)
+local PPBFrame = nil
+local PPBBtns  = {}
+local PPB_UpdateUI  -- forward declaration
 
-local ICON_SIZE  = 24   -- icon button size
-local PAD        = 3    -- gap between icons
-local BORDER     = 2    -- frame edge padding
-local BAN_SIZE   = 10   -- ban-X overlay size
+local ICON_SIZE = 24
+local PAD       = 3
+local BORDER    = 2
 
 local function PPB_CreateFrame()
     PPBFrame = CreateFrame("Frame", "PPBuddyFrame", UIParent)
     PPBFrame:SetHeight(ICON_SIZE + BORDER * 2)
-    PPBFrame:SetWidth(ICON_SIZE + BORDER * 2)  -- resized dynamically
+    PPBFrame:SetWidth(ICON_SIZE + BORDER * 2)
     PPBFrame:SetFrameStrata("MEDIUM")
     PPBFrame:SetBackdrop({
         bgFile   = "Interface\\Buttons\\WHITE8x8",
@@ -209,12 +277,15 @@ local function PPB_CreateFrame()
     PPBFrame:SetScript("OnDragStart", function() this:StartMoving() end)
     PPBFrame:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
+        -- Store as TOPLEFT-relative coords so SetPoint can restore exactly
         PPBuddy_Config.posX = this:GetLeft()
-        PPBuddy_Config.posY = this:GetTop()
+        PPBuddy_Config.posY = this:GetTop() - UIParent:GetHeight()
     end)
-    PPBFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT",
-        PPBuddy_Config.posX or 20,
-        PPBuddy_Config.posY or 400)
+    -- Restore saved position. GetLeft()/GetTop() are TOPLEFT screen coords,
+    -- so we anchor to TOPLEFT of UIParent and use them directly.
+    local x = PPBuddy_Config.posX or 20
+    local y = PPBuddy_Config.posY or -200   -- sensible default near top of screen
+    PPBFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", x, y)
 end
 
 local function PPB_GetOrCreateBtn(i)
@@ -225,37 +296,30 @@ local function PPB_GetOrCreateBtn(i)
     btn:SetHeight(ICON_SIZE)
     btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-    -- Coloured border texture (sits behind icon)
     local border = btn:CreateTexture(nil, "BACKGROUND")
     border:SetAllPoints()
     border:SetTexture("Interface\\Buttons\\WHITE8x8")
     border:SetVertexColor(0, 0, 0, 0)
     btn.border = border
 
-    -- The blessing icon
     local icon = btn:CreateTexture(nil, "ARTWORK")
-    icon:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -1)
+    icon:SetPoint("TOPLEFT",     btn, "TOPLEFT",     1, -1)
     icon:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 1)
     btn.icon = icon
 
-    -- Desaturation overlay for banned state (grey tint via vertex color)
-    -- We'll just desaturate the icon texture directly
-
-    -- Ban indicator: small red X in bottom-right corner
     local banMark = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     banMark:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 1, -1)
     banMark:SetText("")
     btn.banMark = banMark
 
-    -- Tooltip
     btn:SetScript("OnEnter", function()
         local b = this
         GameTooltip:SetOwner(b, "ANCHOR_BOTTOMLEFT")
-        local nameStr = BlessingNames[b.blessingID] or "?"
+        local nameStr  = BlessingNames[b.blessingID] or "?"
         local pallyStr = b.pallyName or "?"
         if b.banned then
             GameTooltip:SetText(nameStr, 0.7, 0.7, 0.7)
-            GameTooltip:AddLine("Banned — auto-removed", 1, 0.4, 0.4)
+            GameTooltip:AddLine("Banned - auto-removed", 1, 0.4, 0.4)
             GameTooltip:AddLine("Right-click to unban", 0.6, 0.6, 0.6)
         elseif b.hasIt then
             GameTooltip:SetText(nameStr, 0.4, 1, 0.4)
@@ -275,19 +339,17 @@ local function PPB_GetOrCreateBtn(i)
     btn:SetScript("OnClick", function()
         local b = this
         if arg1 == "RightButton" then
-            -- Toggle ban
             local capturedBid = b.blessingID
             if PPBuddy_Config.banned[capturedBid] then
                 PPBuddy_Config.banned[capturedBid] = nil
                 PPB_Print(BlessingNames[capturedBid] .. " ban removed.")
             else
                 PPBuddy_Config.banned[capturedBid] = true
-                PPB_Print(BlessingNames[capturedBid] .. " banned — will auto-remove.")
+                PPB_Print(BlessingNames[capturedBid] .. " banned - will auto-remove.")
                 PPB_CancelBuff(capturedBid)
             end
             PPB_UpdateUI()
         elseif arg1 == "LeftButton" then
-            -- Whisper paladin if missing
             if not b.hasIt and not b.banned and b.pallyName then
                 local whisper = "Hey " .. b.pallyName .. ", could I please get "
                     .. (BlessingNames[b.blessingID] or "a blessing") .. "? Thank you! :)"
@@ -308,12 +370,6 @@ end
 PPB_UpdateUI = function()
     if not PPBFrame then return end
 
-    local myClassID = PPB_GetMyClassID()
-    if myClassID == nil then
-        PPBFrame:Hide()
-        return
-    end
-
     local assignments = PPB_GetMyAssignments()
     local count = table.getn(assignments)
 
@@ -322,15 +378,14 @@ PPB_UpdateUI = function()
         return
     end
 
-    -- Resize frame to fit icons horizontally
     local totalW = BORDER * 2 + count * ICON_SIZE + (count - 1) * PAD
     PPBFrame:SetWidth(totalW)
     PPBFrame:SetHeight(ICON_SIZE + BORDER * 2)
 
     for i, info in ipairs(assignments) do
-        local btn = PPB_GetOrCreateBtn(i)
-        local bid = info.blessingID
-        local hasIt = PPB_HasBuff(bid)
+        local btn    = PPB_GetOrCreateBtn(i)
+        local bid    = info.blessingID
+        local hasIt  = PPB_HasBuff(bid)
         local banned = PPBuddy_Config.banned[bid]
 
         btn.blessingID = bid
@@ -338,18 +393,14 @@ PPB_UpdateUI = function()
         btn.hasIt      = hasIt
         btn.banned     = banned
 
-        -- Position
         btn:SetPoint("TOPLEFT", PPBFrame, "TOPLEFT",
-            BORDER + (i - 1) * (ICON_SIZE + PAD),
-            -BORDER)
+            BORDER + (i - 1) * (ICON_SIZE + PAD), -BORDER)
 
-        -- Icon texture
         btn.icon:SetTexture(BlessingIcons[bid])
 
-        -- Colour the border/background to show state
         if banned then
             btn.border:SetVertexColor(0.25, 0.25, 0.25, 0.9)
-            btn.icon:SetVertexColor(0.4, 0.4, 0.4)   -- desaturate
+            btn.icon:SetVertexColor(0.4, 0.4, 0.4)
             btn.banMark:SetText("|cffff3333x|r")
         elseif hasIt then
             btn.border:SetVertexColor(0, 0.7, 0, 0.8)
@@ -364,7 +415,6 @@ PPB_UpdateUI = function()
         btn:Show()
     end
 
-    -- Hide any leftover buttons from a previous larger assignment set
     for i = count + 1, table.getn(PPBBtns) do
         PPBBtns[i]:Hide()
     end
@@ -373,7 +423,7 @@ PPB_UpdateUI = function()
 end
 
 -- ============================================================
--- Auto-remove banned buffs on PLAYER_AURAS_CHANGED
+-- Auto-remove banned buffs
 -- ============================================================
 
 local function PPB_EnforceBans()
@@ -385,36 +435,74 @@ local function PPB_EnforceBans()
 end
 
 -- ============================================================
--- Main event frame
+-- Event handler
 -- ============================================================
 
-local PPBEventFrame = CreateFrame("Frame", "PPBuddyEventFrame", UIParent)
+local timeSince = 0
+local uiDirty   = false
 
+local PPBEventFrame = CreateFrame("Frame", "PPBuddyEventFrame", UIParent)
 PPBEventFrame:RegisterEvent("PLAYER_LOGIN")
 PPBEventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 PPBEventFrame:RegisterEvent("PLAYER_AURAS_CHANGED")
 PPBEventFrame:RegisterEvent("RAID_ROSTER_UPDATE")
 PPBEventFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
-PPBEventFrame:RegisterEvent("ADDON_LOADED")
+PPBEventFrame:RegisterEvent("CHAT_MSG_ADDON")
 
 PPBEventFrame:SetScript("OnEvent", function()
-    if event == "ADDON_LOADED" and arg1 ~= ADDON_NAME then return end
+    if event == "CHAT_MSG_ADDON" and arg1 == PP_PREFIX then
+        local msg    = arg2
+        local sender = arg4
 
-    if event == "PLAYER_AURAS_CHANGED" then
-        PPB_EnforceBans()
-        timeSince = UPDATE_FREQ  -- force immediate UI refresh on next OnUpdate
+        if string.find(msg, "^SELF") then
+            PPB_ParseSelf(sender, msg)
+            uiDirty = true
+
+        elseif string.find(msg, "^MASSIGN") then
+            PPB_ParseMassign(msg)
+            uiDirty = true
+
+        elseif string.find(msg, "^ASSIGN") then
+            -- catches ASSIGN but not MASSIGN/AASSIGN/SASSIGN
+            if not string.find(msg, "^[AMS]ASSIGN") then
+                PPB_ParseAssign(msg)
+                uiDirty = true
+            end
+
+        elseif string.find(msg, "^CLEAR") then
+            PPB_ParseClear(sender)
+            uiDirty = true
+        end
         return
     end
 
-    -- For all other events: rebuild UI after a short delay
-    timeSince = UPDATE_FREQ
+    if event == "PLAYER_AURAS_CHANGED" then
+        PPB_EnforceBans()
+        uiDirty = true
+        return
+    end
+
+    if event == "RAID_ROSTER_UPDATE" or event == "PARTY_MEMBERS_CHANGED" then
+        PPB_PruneAssignments()
+        PPB_SyncFromPP()
+        uiDirty = true
+        return
+    end
+
+    if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_LOGIN" then
+        PPB_SyncFromPP()
+        uiDirty = true
+        return
+    end
 end)
 
 PPBEventFrame:SetScript("OnUpdate", function()
     timeSince = (timeSince or 0) + arg1
     if timeSince >= UPDATE_FREQ then
         timeSince = 0
-        if PPBFrame then
+        PPB_SyncFromPP()
+        if uiDirty and PPBFrame then
+            uiDirty = false
             PPB_UpdateUI()
         end
     end
@@ -428,16 +516,17 @@ SlashCmdList["PPBUDDY"] = function(msg)
     msg = string.lower(msg or "")
     if msg == "show" then
         if not PPBFrame then PPB_Init() end
-        PPBFrame:Show()
+        PPB_SyncFromPP()
         PPB_UpdateUI()
+        if PPBFrame then PPBFrame:Show() end
     elseif msg == "hide" then
         if PPBFrame then PPBFrame:Hide() end
     elseif msg == "reset" then
         if PPBFrame then
             PPBFrame:ClearAllPoints()
-            PPBFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", 20, 400)
+            PPBFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 20, -200)
             PPBuddy_Config.posX = 20
-            PPBuddy_Config.posY = 400
+            PPBuddy_Config.posY = -200
         end
     elseif msg == "bans" then
         PPB_Print("Banned blessings:")
@@ -452,42 +541,30 @@ SlashCmdList["PPBUDDY"] = function(msg)
         PPB_Print("All bans cleared.")
         PPB_UpdateUI()
     elseif msg == "debug" then
-        -- Dump raw PallyPower data to chat so you can verify what PP sees
         local _, token = UnitClass("player")
         local myID = ClassTokenToID[token]
         PPB_Print("=== PPBuddy Debug ===")
-        PPB_Print("Class token: " .. tostring(token) .. "  -> PP classID: " .. tostring(myID))
-        if not PallyPower_Assignments then
-            PPB_Print("PallyPower_Assignments is NIL (PallyPowerTW not loaded yet?)")
-            return
-        end
+        PPB_Print("Class: " .. tostring(token) .. " -> PP classID: " .. tostring(myID))
+        PPB_Print("PP globals present: " .. (PallyPower_Assignments and "YES" or "NO"))
         local count = 0
-        for pallyName, assignments in next, PallyPower_Assignments do
+        for pallyName, assignments in next, PPB_Assignments do
             count = count + 1
-            local line = "  Pally: " .. tostring(pallyName) .. " -> "
+            local line = "  " .. tostring(pallyName) .. ": "
             if type(assignments) == "table" then
                 for classID = 0, 9 do
                     local bid = assignments[classID]
                     if bid and bid ~= -1 then
-                        line = line .. "[class" .. classID .. "=" .. tostring(bid) .. " (" .. (BlessingNames[bid] or "?") .. ")] "
+                        line = line .. "[c" .. classID .. "=" .. (BlessingNames[bid] or tostring(bid)) .. "] "
                     end
                 end
-            else
-                line = line .. tostring(assignments)
             end
             PPB_Print(line)
         end
-        if count == 0 then
-            PPB_Print("  PallyPower_Assignments is EMPTY (no pallies seen yet?)")
-        end
-        PPB_Print("My assignments found:")
+        if count == 0 then PPB_Print("  No assignments known yet.") end
         local found = PPB_GetMyAssignments()
-        if table.getn(found) == 0 then
-            PPB_Print("  (none for classID " .. tostring(myID) .. ")")
-        else
-            for i, info in ipairs(found) do
-                PPB_Print("  " .. BlessingNames[info.blessingID] .. " from " .. info.pallyName)
-            end
+        PPB_Print("My buffs (" .. table.getn(found) .. "):")
+        for _, info in ipairs(found) do
+            PPB_Print("  " .. BlessingNames[info.blessingID] .. " from " .. info.pallyName)
         end
     else
         PPB_Print("Commands: /ppb show | hide | reset | bans | clearbans | debug")
@@ -497,25 +574,24 @@ SLASH_PPBUDDY1 = "/ppb"
 SLASH_PPBUDDY2 = "/ppbuddy"
 
 -- ============================================================
--- Init (called on PLAYER_LOGIN after PallyPowerTW has loaded)
+-- Init
 -- ============================================================
 
 local initDone = false
-local function PPB_Init()
+function PPB_Init()
     if initDone then return end
     initDone = true
 
-    -- Ensure saved var table has all keys
-    if not PPBuddy_Config then PPBuddy_Config = {} end
-    if not PPBuddy_Config.banned then PPBuddy_Config.banned = {} end
+    -- Apply defaults only for keys not already restored from disk
+    if not PPBuddy_Config        then PPBuddy_Config         = {} end
+    if not PPBuddy_Config.banned then PPBuddy_Config.banned  = {} end
+    -- posX/posY intentionally left nil if not saved — CreateFrame uses fallback
 
     PPB_CreateFrame()
+    PPB_SyncFromPP()
     PPB_UpdateUI()
 end
 
--- Hook into PLAYER_LOGIN (guaranteed after all ADDON_LOADED events)
 local initFrame = CreateFrame("Frame")
 initFrame:RegisterEvent("PLAYER_LOGIN")
-initFrame:SetScript("OnEvent", function()
-    PPB_Init()
-end)
+initFrame:SetScript("OnEvent", function() PPB_Init() end)
