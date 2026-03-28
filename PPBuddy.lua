@@ -16,6 +16,7 @@
 -- ============================================================
 local PP_PREFIX   = "PLPWR"
 local UPDATE_FREQ = 2
+local initDone    = false
 
 -- PallyPower class IDs — mirrors PallyPower_ClassID in PP localization.
 -- Key: UnitClass() token (always English uppercase in 1.12).
@@ -244,6 +245,16 @@ local function PPB_GetMyAssignments()
     return results
 end
 
+
+-- Broadcast a REQ on the PLPWR channel so all pallies re-send their assignments.
+-- PP clients respond to this with their full SELF message.
+local function PPB_RequestAssignments()
+    local channel = GetNumRaidMembers() > 0 and "RAID" or "PARTY"
+    if GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0 then
+        SendAddonMessage(PP_PREFIX, "REQ", channel)
+    end
+end
+
 -- ============================================================
 -- Frame construction
 -- ============================================================
@@ -277,9 +288,10 @@ local function PPB_CreateFrame()
     PPBFrame:SetScript("OnDragStart", function() this:StartMoving() end)
     PPBFrame:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
-        -- Store as TOPLEFT-relative coords so SetPoint can restore exactly
+        -- GetLeft() = x offset from left edge (positive)
+        -- GetTop()  = y offset from top edge (positive), negate for TOPLEFT anchor
         PPBuddy_Config.posX = this:GetLeft()
-        PPBuddy_Config.posY = this:GetTop() - UIParent:GetHeight()
+        PPBuddy_Config.posY = this:GetTop() * -1
     end)
     -- Restore saved position. GetLeft()/GetTop() are TOPLEFT screen coords,
     -- so we anchor to TOPLEFT of UIParent and use them directly.
@@ -477,7 +489,7 @@ PPBEventFrame:SetScript("OnEvent", function()
     end
 
     if event == "PLAYER_AURAS_CHANGED" then
-        PPB_EnforceBans()
+        if initDone then PPB_EnforceBans() end
         uiDirty = true
         return
     end
@@ -491,12 +503,14 @@ PPBEventFrame:SetScript("OnEvent", function()
 
     if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_LOGIN" then
         PPB_SyncFromPP()
+        PPB_RequestAssignments()
         uiDirty = true
         return
     end
 end)
 
 PPBEventFrame:SetScript("OnUpdate", function()
+    if not initDone then return end
     timeSince = (timeSince or 0) + arg1
     if timeSince >= UPDATE_FREQ then
         timeSince = 0
@@ -577,7 +591,6 @@ SLASH_PPBUDDY2 = "/ppbuddy"
 -- Init
 -- ============================================================
 
-local initDone = false
 function PPB_Init()
     if initDone then return end
     initDone = true
@@ -590,8 +603,10 @@ function PPB_Init()
     PPB_CreateFrame()
     PPB_SyncFromPP()
     PPB_UpdateUI()
+    -- Ask all pallies to re-broadcast their assignments
+    PPB_RequestAssignments()
 end
 
 local initFrame = CreateFrame("Frame")
-initFrame:RegisterEvent("PLAYER_LOGIN")
+initFrame:RegisterEvent("VARIABLES_LOADED")
 initFrame:SetScript("OnEvent", function() PPB_Init() end)
