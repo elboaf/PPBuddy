@@ -1,8 +1,8 @@
 ## Interface: 11200
 ## Title: PPBuddy
-## Notes: Mini buff bar showing your assigned paladin blessings. Click missing buffs to whisper the assigned paladin.
-## Author: (you)
-## Version: 1.0.1
-## Dependencies: PallyPowerTW
+## Notes: Compact blessing status bar. Works with any paladin running PallyPowerTW.
+## Author: Rel
+## Version: 2.0
+## SavedVariables: PPBuddy_Config
 
 PPBuddy.lua
