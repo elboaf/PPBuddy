@@ -2,46 +2,51 @@
 
 A companion addon for **PallyPowerTW** (WoW 1.12 / TurtleWoW).
 
-Shows a draggable mini-bar listing every paladin blessing assigned to your class, color-coded so you can instantly see what you have, what you're missing, and who to ask.
+Shows a compact icon bar listing every paladin blessing assigned to your class. At a glance you can see what you have, what you're missing, and click to ask for it.
 
 ## Requirements
 
-- **PallyPowerTW** must be installed and loaded. PPBuddy reads its shared globals (`PallyPower_Assignments`, etc.) — no code changes to PallyPowerTW are needed.
-
-## Features
-
-| Feature | Detail |
-|---|---|
-| **Live buff status** | Scans your buffs every 2 s; green = have it, red = missing |
-| **Assigned paladin name** | Shows which paladin is responsible when a buff is missing |
-| **Whisper on click** | Click a **red (missing) row** to whisper the assigned paladin a polite request |
-| **Ban checkbox** | Check the **X box** on any row to ban that buff — it is auto-removed whenever applied to you (same mechanic as LazyPig's Salvation Remover) |
-| **Draggable** | Drag the frame anywhere; position is saved across sessions |
+**PallyPowerTW must be installed and loaded.** PPBuddy reads PP's shared globals (`PallyPower_Assignments`, etc.) to know which blessings are assigned to your class and by whom. It requires no changes to PallyPowerTW itself.
 
 ## Installation
 
-1. Drop the `PPBuddy` folder into `Interface/AddOns/`.
-2. Make sure `PallyPowerTW` is also installed and enabled.
-3. Reload UI or log in.
+Drop the `PPBuddy` folder into `Interface/AddOns/` alongside PallyPowerTW and reload.
+
+## The Bar
+
+A small horizontal strip of blessing icons — one per buff assigned to your class. Nothing else. Drag it anywhere to reposition; location is saved across sessions.
+
+| Border colour | Meaning |
+|---|---|
+| 🟢 Green | You have this buff |
+| 🔴 Red | Missing |
+| ⬛ Grey + dimmed | Banned (auto-removed) |
+
+## Controls
+
+| Input | Action |
+|---|---|
+| **Hover** | Tooltip shows buff name, assigned paladin, and available actions |
+| **Left-click** a red icon | Whispers the assigned paladin asking for the buff |
+| **Right-click** any icon | Toggles ban on that buff |
+
+## Banning a Buff
+
+Right-clicking an icon bans that blessing — PPBuddy will automatically cancel it via `CancelPlayerBuff()` whenever it's applied to you, on every `PLAYER_AURAS_CHANGED` event. Same mechanic LazyPig uses for Salvation removal. Bans persist across sessions.
 
 ## Slash Commands
 
 | Command | Effect |
 |---|---|
-| `/ppb` | Show help |
 | `/ppb show` | Show the bar |
 | `/ppb hide` | Hide the bar |
 | `/ppb reset` | Reset position to default |
 | `/ppb bans` | List currently banned blessings |
 | `/ppb clearbans` | Remove all bans |
-
-## How banning works
-
-Ticking the **X** checkbox next to a blessing marks it as *banned*.  
-On every `PLAYER_AURAS_CHANGED` event, PPBuddy scans your active buffs and calls `CancelPlayerBuff()` on any banned blessing it finds — identical to how LazyPig removes Salvation.  The ban persists across sessions via the `PPBuddy_Config` saved variable.
+| `/ppb debug` | Dump raw PallyPower assignment data to chat |
 
 ## Notes
 
-- Works for any non-Paladin class. Paladins are already covered by PallyPowerTW's own BuffBar.
-- Hunter Pets and Warriors share Class ID 0 in PallyPower — if you see a Warrior blessing it also applies to Hunter pets (vanilla behaviour).
-- The frame updates every 2 seconds to match PallyPower's debounce window.
+- The bar auto-hides when PP has no assignments for your class yet.
+- Paladins already have PP's own BuffBar — PPBuddy is for everyone else.
+- Hunter Pets and Warriors share Class ID 0 in PallyPower, so a Warrior blessing covers both (vanilla behaviour, not a bug).
